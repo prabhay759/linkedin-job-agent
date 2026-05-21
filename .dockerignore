@@ -1,0 +1,13 @@
+.env
+.env.local
+.git
+.gitignore
+__pycache__
+*.py[cod]
+data/seen_jobs.json
+data/applications.json
+data/skills.json
+data/pdfs/
+.venv
+venv
+*.md

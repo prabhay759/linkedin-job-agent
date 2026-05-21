@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""
+LinkedIn Job Application Agent
+Scans LinkedIn every hour, scores jobs vs. your profile, generates tailored
+CVs + cover letters, asks Telegram for confirmation, then applies automatically.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+import threading
+import uuid
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional
+
+import schedule
+import time
+
+from src.config import load_config, Config
+from src.models import Application, JobListing
+from src.store import (
+    load_seen_job_ids,
+    save_seen_job_ids,
+    upsert_application,
+    get_pending_applications,
+    get_application_by_telegram_message_id,
+)
+from src.scraper import scrape_profile, fetch_jobs
+from src.analyzer import score_jobs_batch, generate_cv_content, generate_cover_letter_content
+from src.document_generator import generate_cv_pdf, generate_cover_letter_pdf
+from src.notifier import send_job_confirmation, send_application_result, send_startup_message, send_error
+from src.telegram_bot import TelegramCommandBot
+from src.applicator import Applicator
+from src.skill_manager import SkillManager
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("main")
+
+# Global state
+_scan_lock = threading.Lock()
+_config_lock = threading.Lock()
+_apply_lock = threading.Lock()
+_config: Optional[Config] = None
+_skill_manager: Optional[SkillManager] = None
+_seen_ids: set = set()
+
+
+def _personal_info() -> dict:
+    return {
+        "name": _config.your_full_name,
+        "email": _config.your_email,
+        "phone": _config.your_phone,
+        "location": _config.your_location,
+        "linkedin_url": _config.linkedin_profile_url,
+    }
+
+
+def run_scan() -> None:
+    """Full scan cycle: scrape → score → generate docs → send confirmations."""
+    global _seen_ids
+    if not _scan_lock.acquire(blocking=False):
+        log.info("Scan already in progress, skipping")
+        return
+
+    try:
+        log.info("=== Starting job scan ===")
+        with _config_lock:
+            cfg = _config
+
+        # 1. Scrape user profile
+        log.info("Scraping LinkedIn profile: %s", cfg.linkedin_profile_url)
+        try:
+            profile_text = asyncio.run(scrape_profile(cfg.linkedin_profile_url))
+            log.info("Profile scraped: %d chars", len(profile_text))
+        except Exception as e:
+            log.error("Profile scraping failed: %s", e)
+            send_error(cfg.telegram_bot_token, cfg.telegram_chat_id, f"Profile scraping failed: {e}")
+            return
+
+        # 2. Fetch new jobs
+        log.info("Fetching jobs for keywords: %s", cfg.job_keywords)
+        try:
+            jobs = asyncio.run(fetch_jobs(cfg, _seen_ids))
+            log.info("Fetched %d new jobs", len(jobs))
+        except Exception as e:
+            log.error("Job fetching failed: %s", e)
+            send_error(cfg.telegram_bot_token, cfg.telegram_chat_id, f"Job fetching failed: {e}")
+            return
+
+        if not jobs:
+            log.info("No new jobs found")
+            return
+
+        # 3. Score jobs
+        log.info("Scoring %d jobs (min score: %d)...", len(jobs), cfg.min_score)
+        try:
+            qualified_jobs = score_jobs_batch(jobs, profile_text, cfg.together_api_key, cfg.min_score)
+            log.info("%d jobs qualify (score >= %d)", len(qualified_jobs), cfg.min_score)
+        except Exception as e:
+            log.error("Job scoring failed: %s", e)
+            return
+
+        # Mark all fetched jobs as seen (even if below threshold)
+        for job in jobs:
+            _seen_ids.add(job.id)
+        save_seen_job_ids(_seen_ids)
+
+        # 4. For each qualified job: generate docs + send confirmation
+        for job in qualified_jobs:
+            try:
+                _process_job(job, profile_text, cfg)
+            except Exception as e:
+                log.error("Failed to process job %s: %s", job.id, e)
+
+        log.info("=== Scan complete ===")
+    finally:
+        _scan_lock.release()
+
+
+def _process_job(job: JobListing, profile_text: str, cfg: Config) -> None:
+    log.info("Processing: %s @ %s (score %d)", job.title, job.company, job.score)
+    personal = _personal_info()
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    # Generate CV and cover letter content via LLM
+    cv_data = generate_cv_content(job, profile_text, cfg.together_api_key, personal)
+    cl_data = generate_cover_letter_content(job, profile_text, cfg.together_api_key, personal)
+    cl_data["date"] = today
+
+    # Generate PDFs
+    cv_path = asyncio.run(generate_cv_pdf(cv_data, job.id))
+    cl_path = asyncio.run(generate_cover_letter_pdf(cl_data, job.id))
+
+    # Create application record
+    app = Application(
+        id=str(uuid.uuid4()),
+        job_id=job.id,
+        job_title=job.title,
+        company=job.company,
+        job_url=job.url,
+        apply_url=job.apply_url,
+        score=job.score,
+        status="pending_confirmation",
+        cv_path=str(cv_path),
+        cover_letter_path=str(cl_path),
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    upsert_application(app)
+
+    # Send Telegram confirmation
+    message_id = send_job_confirmation(
+        cfg.telegram_bot_token,
+        cfg.telegram_chat_id,
+        job,
+        app,
+    )
+    if message_id:
+        app.telegram_message_id = message_id
+        upsert_application(app)
+        log.info("Confirmation sent for %s (message_id=%d)", job.title, message_id)
+    else:
+        log.warning("Failed to send Telegram confirmation for %s", job.title)
+
+
+def on_yes_reply(confirmation_message_id: int) -> None:
+    """Called by TelegramCommandBot when user replies YES to a confirmation."""
+    with _config_lock:
+        cfg = _config
+
+    app = get_application_by_telegram_message_id(confirmation_message_id)
+    if not app:
+        log.warning("YES reply for unknown message_id=%d", confirmation_message_id)
+        return
+    if app.status != "pending_confirmation":
+        log.info("YES reply for app %s already in status %s", app.id, app.status)
+        return
+
+    log.info("User confirmed application for %s @ %s", app.job_title, app.company)
+    app.status = "applying"
+    app.confirmed_at = datetime.now(timezone.utc).isoformat()
+    upsert_application(app)
+
+    # Find the corresponding JobListing data (rebuild minimal from app)
+    job = _rebuild_job_from_app(app)
+
+    # Apply in background thread
+    t = threading.Thread(
+        target=lambda: asyncio.run(_apply_and_notify(app, job, cfg)),
+        daemon=True,
+        name=f"apply-{app.id[:8]}",
+    )
+    t.start()
+
+
+def _rebuild_job_from_app(app: Application) -> JobListing:
+    return JobListing(
+        id=app.job_id,
+        title=app.job_title,
+        company=app.company,
+        location="",
+        url=app.job_url,
+        apply_url=app.apply_url,
+        description="",
+        is_easy_apply=(app.apply_url is None),
+        scraped_at=app.created_at,
+    )
+
+
+async def _apply_and_notify(app: Application, job: JobListing, cfg: Config) -> None:
+    applicator = Applicator(cfg, _skill_manager)
+    success = await applicator.apply(app, job)
+
+    app.status = "applied" if success else "failed"
+    app.applied_at = datetime.now(timezone.utc).isoformat()
+    upsert_application(app)
+
+    send_application_result(cfg.telegram_bot_token, cfg.telegram_chat_id, app)
+    log.info("Application %s: %s @ %s", app.status, app.job_title, app.company)
+
+
+def expire_pending_check() -> None:
+    """Expire pending confirmations older than CONFIRMATION_TIMEOUT_HOURS."""
+    with _config_lock:
+        timeout_hours = _config.confirmation_timeout_hours
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
+    for app in get_pending_applications():
+        created = datetime.fromisoformat(app.created_at.replace("Z", "+00:00"))
+        if created < cutoff:
+            app.status = "expired"
+            upsert_application(app)
+            log.info("Expired confirmation for %s @ %s", app.job_title, app.company)
+
+
+def main() -> None:
+    global _config, _skill_manager, _seen_ids
+
+    log.info("LinkedIn Job Agent starting up...")
+
+    # 1. Load and validate config
+    try:
+        _config = load_config()
+        _config.validate()
+    except Exception as e:
+        log.error("Config error: %s", e)
+        sys.exit(1)
+
+    # 2. Init dependencies
+    _skill_manager = SkillManager(_config.together_api_key)
+    _seen_ids = load_seen_job_ids()
+    log.info("Loaded %d seen job IDs, %d skills", len(_seen_ids), len(_skill_manager.list_skills()))
+
+    # 3. Start Telegram command bot
+    bot = TelegramCommandBot(
+        config=_config,
+        config_lock=_config_lock,
+        on_hunt=run_scan,
+        on_yes_reply=on_yes_reply,
+    )
+    bot.start()
+    log.info("Telegram bot started")
+
+    # 4. Send startup notification
+    send_startup_message(
+        _config.telegram_bot_token,
+        _config.telegram_chat_id,
+        _config.job_keywords,
+        _config.job_locations,
+    )
+
+    # 5. Schedule recurring tasks
+    schedule.every(_config.scan_interval_minutes).minutes.do(run_scan)
+    schedule.every(5).minutes.do(expire_pending_check)
+    log.info("Scheduler configured: scan every %d min", _config.scan_interval_minutes)
+
+    # 6. Immediate first scan
+    log.info("Running initial scan...")
+    scan_thread = threading.Thread(target=run_scan, daemon=True)
+    scan_thread.start()
+
+    # 7. Main scheduler loop
+    log.info("Entering scheduler loop")
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(30)
+    except KeyboardInterrupt:
+        log.info("Shutting down")
+        bot.stop()
+
+
+if __name__ == "__main__":
+    main()

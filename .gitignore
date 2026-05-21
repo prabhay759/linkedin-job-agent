@@ -1,0 +1,25 @@
+# Environment
+.env
+.env.local
+
+# Runtime data (keep structure, not content)
+data/seen_jobs.json
+data/applications.json
+data/skills.json
+data/pdfs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
