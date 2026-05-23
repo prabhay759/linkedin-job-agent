@@ -124,6 +124,11 @@ def run_scan() -> None:
 
         if not jobs:
             log.info("No new jobs found")
+            from src.notifier import send_message
+            send_message(
+                cfg.telegram_bot_token, cfg.telegram_chat_id,
+                "No new jobs found matching your keywords and locations.",
+            )
             return
 
         # 3. Score jobs
@@ -141,6 +146,15 @@ def run_scan() -> None:
         save_seen_job_ids(_seen_ids)
 
         # 4. For each qualified job: generate docs + send confirmation
+        if not qualified_jobs:
+            from src.notifier import send_message
+            send_message(
+                cfg.telegram_bot_token, cfg.telegram_chat_id,
+                f"No match found — scanned {len(jobs)} job(s), none scored {cfg.min_score}/10 or above.",
+            )
+            log.info("No jobs met the minimum score threshold")
+            return
+
         for job in qualified_jobs:
             try:
                 _process_job(job, profile_text, cfg)
