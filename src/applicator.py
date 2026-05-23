@@ -37,24 +37,25 @@ class Applicator:
             browser, context = await _make_context(pw)
             page = await context.new_page()
             try:
-                logged_in = await _login_linkedin(page, context, self._config)
-                if not logged_in:
-                    app.error = "LinkedIn login failed"
+                if job.is_easy_apply:
+                    # Easy Apply requires a LinkedIn session
+                    logged_in = await _login_linkedin(page, context, self._config)
+                    if not logged_in:
+                        app.error = (
+                            "Easy Apply needs LinkedIn cookies. "
+                            "Send /setcookies in Telegram for setup instructions."
+                        )
+                        return False
+                    return await self._apply_easy_apply(page, job, app)
+
+                elif job.apply_url:
+                    # External ATS — go straight to the URL, no LinkedIn login needed
+                    return await self._apply_external(page, job, app)
+
+                else:
+                    app.error = "No apply URL found for this job"
                     return False
 
-                if job.is_easy_apply:
-                    return await self._apply_easy_apply(page, job, app)
-                elif job.apply_url:
-                    return await self._apply_external(page, job, app)
-                else:
-                    # Navigate to job and try Easy Apply
-                    await page.goto(job.url, wait_until="domcontentloaded", timeout=30_000)
-                    await page.wait_for_timeout(2000)
-                    easy_btn = await page.query_selector(_EA["easy_apply_btn"])
-                    if easy_btn:
-                        return await self._apply_easy_apply(page, job, app)
-                    app.error = "No apply button found"
-                    return False
             except Exception as e:
                 app.error = str(e)
                 log.error("Apply failed for %s: %s", job.title, e)

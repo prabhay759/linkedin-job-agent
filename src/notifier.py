@@ -76,7 +76,10 @@ def send_job_confirmation(
     app: Application,
 ) -> Optional[int]:
     bullets = "\n".join(f"• {b}" for b in (job.summary_bullets or []))
-    apply_type = "LinkedIn Easy Apply" if job.is_easy_apply else "External Application"
+    if job.is_easy_apply:
+        apply_type = "LinkedIn Easy Apply ⚠️ _(needs cookies — see /setcookies)_"
+    else:
+        apply_type = "External Application ✅ _(no login needed)_"
     text = (
         f"*Job Match Found!* Score: *{job.score}/10*\n\n"
         f"*Position:* {job.title}\n"
@@ -133,9 +136,11 @@ def send_startup_message(token: str, chat_id: str, keywords: list, locations: li
     send_message(
         token,
         chat_id,
-        f"*LinkedIn Job Agent ready*\n\nKeywords: `{kw}`\nLocations: `{loc}`\n\n"
-        f"Send /hunt to start a job scan.\n"
-        f"Commands: /hunt /status /history /setprofile /help",
+        f"*LinkedIn Job Agent ready* ✅\n\n"
+        f"Keywords: `{kw}`\nLocations: `{loc}`\n\n"
+        f"• /hunt — scan for matching jobs\n"
+        f"• /setcookies — set up Easy Apply (optional, external ATS works without it)\n"
+        f"• /help — all commands",
     )
 
 

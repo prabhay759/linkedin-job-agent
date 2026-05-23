@@ -254,13 +254,22 @@ class TelegramCommandBot:
     def _cmd_setcookies(self, _: str) -> None:
         self._reply(
             "*Import LinkedIn Cookies*\n\n"
-            "Send a JSON cookie file directly to this chat.\n\n"
-            "How to export from Chrome:\n"
-            "1. Log into linkedin.com in your browser\n"
+            "Only needed for *Easy Apply* jobs. External ATS jobs work without this.\n\n"
+            "*📱 On Android (Firefox):*\n"
+            "1. Install *Firefox for Android*\n"
+            "2. Open Firefox → go to `linkedin.com` and log in\n"
+            "3. Install add-on: *Cookie Quick Manager* (search in Firefox add-ons)\n"
+            "4. Tap the add-on → *Export as JSON file*\n"
+            "5. Send that file here\n\n"
+            "*💻 On Desktop Chrome:*\n"
+            "1. Log into `linkedin.com`\n"
             "2. Install *Cookie-Editor* extension\n"
-            "3. Click the extension → *Export* → *Export All* (JSON)\n"
-            "4. Save the file and send it here\n\n"
-            "The agent will use these cookies to apply — no password login needed."
+            "3. Click it → *Export* → *All* (JSON) → send file here\n\n"
+            "*☁️ No browser at all? Use Google Colab:*\n"
+            "1. Open colab.research.google.com\n"
+            "2. Run: `!pip install playwright && playwright install chromium`\n"
+            "3. Run the login script — I'll generate it for you on request\n\n"
+            "Cookies are saved on the Railway volume and reused automatically."
         )
 
     def _cmd_help(self, _: str) -> None:
