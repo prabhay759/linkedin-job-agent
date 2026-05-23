@@ -99,14 +99,17 @@ def run_scan() -> None:
         with _config_lock:
             cfg = _config
 
-        # 1. Scrape user profile
-        log.info("Scraping LinkedIn profile: %s", cfg.linkedin_profile_url)
+        # 1. Scrape user profile (falls back to cache if LinkedIn blocks)
+        log.info("Fetching profile: %s", cfg.linkedin_profile_url)
         try:
             profile_text = asyncio.run(scrape_profile(cfg.linkedin_profile_url))
-            log.info("Profile scraped: %d chars", len(profile_text))
+            log.info("Profile ready: %d chars", len(profile_text))
         except Exception as e:
-            log.error("Profile scraping failed: %s", e)
-            send_error(cfg.telegram_bot_token, cfg.telegram_chat_id, f"Profile scraping failed: {e}")
+            log.error("Profile unavailable: %s", e)
+            send_error(
+                cfg.telegram_bot_token, cfg.telegram_chat_id,
+                f"Profile unavailable: {e}\n\nUse `/setprofile <text>` in Telegram to paste your CV/profile directly and skip LinkedIn scraping.",
+            )
             return
 
         # 2. Fetch new jobs

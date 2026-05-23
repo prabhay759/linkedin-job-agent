@@ -247,13 +247,33 @@ class TelegramCommandBot:
         self._reply("\n".join(lines))
 
     def _cmd_setprofile(self, arg: str) -> None:
-        url = arg.strip()
-        if not url.startswith("https://www.linkedin.com/in/"):
-            self._reply("Please provide a valid LinkedIn profile URL, e.g.:\n`/setprofile https://www.linkedin.com/in/yourname/`")
+        arg = arg.strip()
+        if not arg:
+            self._reply(
+                "*Set your profile*\n\n"
+                "Option 1 — LinkedIn URL (agent will scrape it):\n"
+                "`/setprofile https://www.linkedin.com/in/yourname/`\n\n"
+                "Option 2 — paste profile text directly (best if scraping is blocked):\n"
+                "`/setprofile John Doe | Senior Engineer | 5yr Python, AWS...`"
+            )
             return
-        with self._config_lock:
-            self._config.linkedin_profile_url = url
-        self._reply(f"Profile URL updated to:\n`{url}`")
+
+        if arg.startswith("https://www.linkedin.com/in/"):
+            with self._config_lock:
+                self._config.linkedin_profile_url = arg
+            self._reply(f"Profile URL updated to:\n`{arg}`\n\nAgent will scrape it on next /hunt.")
+            return
+
+        # Manual profile text — save directly to cache, bypasses scraping
+        from pathlib import Path as _Path
+        cache = _Path("data/profile_cache.txt")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(arg)
+        self._reply(
+            f"Profile text saved ({len(arg)} chars) — scraping bypassed. "
+            "This will be used on every /hunt. "
+            "Send `/setprofile <linkedin-url>` to switch back to auto-scraping."
+        )
 
     def _send_colab_script(self) -> None:
         with self._config_lock:
