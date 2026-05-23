@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,10 +235,16 @@ async def fetch_jobs(config: Config, seen_ids: set) -> List[JobListing]:
         follow_redirects=True,
         timeout=30,
     ) as client:
+        first_combo = True
         for keyword in config.job_keywords:
             for location in config.job_locations:
                 if len(jobs) >= config.max_jobs_per_scan:
                     break
+                # Pause between combos to avoid rate limiting (skip on first)
+                if not first_combo:
+                    await asyncio.sleep(5 + random.uniform(0, 3))
+                first_combo = False
+
                 fetched = await _search_jobs_guest(
                     client, keyword, location,
                     seen_ids | seen_in_run,
@@ -251,6 +258,23 @@ async def fetch_jobs(config: Config, seen_ids: set) -> List[JobListing]:
     return jobs
 
 
+async def _polite_get(client: httpx.AsyncClient, url: str, **kwargs) -> Optional[httpx.Response]:
+    """GET with 429-aware retry and jittered delays to avoid rate limiting."""
+    for attempt in range(1, 4):
+        try:
+            r = await client.get(url, **kwargs)
+            if r.status_code == 429:
+                wait = 15 * attempt + random.uniform(0, 5)
+                log.warning("LinkedIn 429 rate-limit — waiting %.0fs (attempt %d/3)", wait, attempt)
+                await asyncio.sleep(wait)
+                continue
+            return r
+        except Exception as e:
+            log.warning("Request error (attempt %d/3): %s", attempt, e)
+            await asyncio.sleep(5 * attempt)
+    return None
+
+
 async def _search_jobs_guest(
     client: httpx.AsyncClient,
     keyword: str,
@@ -258,22 +282,19 @@ async def _search_jobs_guest(
     seen_ids: set,
     max_results: int,
 ) -> List[JobListing]:
-    try:
-        r = await client.get(
-            _GUEST_JOBS_API,
-            params={
-                "keywords": keyword,
-                "location": location,
-                "start": 0,
-                "f_TPR": "r86400",
-                "count": min(max_results, 25),
-            },
-        )
-        if r.status_code != 200:
-            log.warning("LinkedIn guest API %d for '%s'/'%s'", r.status_code, keyword, location)
-            return []
-    except Exception as e:
-        log.warning("LinkedIn guest API request failed: %s", e)
+    r = await _polite_get(
+        client,
+        _GUEST_JOBS_API,
+        params={
+            "keywords": keyword,
+            "location": location,
+            "start": 0,
+            "f_TPR": "r86400",
+            "count": min(max_results, 25),
+        },
+    )
+    if r is None or r.status_code != 200:
+        log.warning("LinkedIn guest API failed for '%s'/'%s'", keyword, location)
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -292,6 +313,9 @@ async def _search_jobs_guest(
         company = _text(card.find(class_=re.compile(r"base-search-card__subtitle")))
         loc = _text(card.find(class_=re.compile(r"job-search-card__location"))) or location
 
+        # Polite delay before each detail fetch (2-4s with jitter)
+        await asyncio.sleep(2 + random.uniform(0, 2))
+
         detail = await _fetch_job_detail_guest(client, job_id)
         if detail is None:
             continue
@@ -308,7 +332,6 @@ async def _search_jobs_guest(
             scraped_at=datetime.now(timezone.utc).isoformat(),
         ))
 
-        await asyncio.sleep(0.8)
         if len(jobs) >= max_results:
             break
 
@@ -319,8 +342,8 @@ async def _fetch_job_detail_guest(
     client: httpx.AsyncClient, job_id: str
 ) -> Optional[dict]:
     try:
-        r = await client.get(_JOB_VIEW_URL.format(job_id), timeout=20)
-        if r.status_code != 200:
+        r = await _polite_get(client, _JOB_VIEW_URL.format(job_id), timeout=20)
+        if r is None or r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
 
