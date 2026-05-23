@@ -25,7 +25,7 @@ class Config:
     your_location: str
     min_score: int = 7
     confirmation_timeout_hours: int = 24
-    max_jobs_per_scan: int = 20
+    max_jobs_per_scan: int = 50
 
     def validate(self) -> None:
         required = [
@@ -63,5 +63,5 @@ def load_config() -> Config:
         your_location=os.getenv("YOUR_LOCATION", ""),
         min_score=int(os.getenv("MIN_SCORE", "7")),
         confirmation_timeout_hours=int(os.getenv("CONFIRMATION_TIMEOUT_HOURS", "24")),
-        max_jobs_per_scan=int(os.getenv("MAX_JOBS_PER_SCAN", "20")),
+        max_jobs_per_scan=int(os.getenv("MAX_JOBS_PER_SCAN", "50")),
     )
