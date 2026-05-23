@@ -46,6 +46,41 @@ def _extract_job_id(url: str) -> str:
     return str(abs(hash(url)))
 
 
+_LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-extensions",
+    "--disable-infobars",
+]
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# Injected into every page to hide webdriver fingerprint
+_STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+"""
+
+
+async def _make_context(pw):
+    """Return a stealth browser context that mimics a real Chrome installation."""
+    browser = await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+    context = await browser.new_context(
+        user_agent=_USER_AGENT,
+        viewport={"width": 1280, "height": 800},
+        locale="en-US",
+        timezone_id="America/New_York",
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+    )
+    await context.add_init_script(_STEALTH_SCRIPT)
+    return browser, context
+
+
 def _build_search_url(keyword: str, location: str, start: int = 0) -> str:
     params = {
         "keywords": keyword,
@@ -58,11 +93,16 @@ def _build_search_url(keyword: str, location: str, start: int = 0) -> str:
 
 async def _login_linkedin(page: Page, config: Config) -> bool:
     try:
-        await page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
+        await page.goto(LINKEDIN_LOGIN_URL, wait_until="load", timeout=60_000)
+        # Wait for the form to actually render (headless detection can delay this)
+        await page.wait_for_selector(_SEL["email"], timeout=20_000)
+        await page.wait_for_timeout(800)
         await page.fill(_SEL["email"], config.linkedin_email)
+        await page.wait_for_timeout(400)
         await page.fill(_SEL["password"], config.linkedin_password)
+        await page.wait_for_timeout(400)
         await page.click(_SEL["submit"])
-        await page.wait_for_url("**/feed/**", timeout=20_000)
+        await page.wait_for_url("**/feed/**", timeout=30_000)
         log.info("LinkedIn login successful")
         return True
     except Exception as e:
@@ -73,10 +113,10 @@ async def _login_linkedin(page: Page, config: Config) -> bool:
 async def scrape_profile(profile_url: str) -> str:
     """Scrape public LinkedIn profile, return plain text for LLM."""
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = await browser.new_page()
+        browser, context = await _make_context(pw)
+        page = await context.new_page()
         try:
-            await page.goto(profile_url, wait_until="domcontentloaded", timeout=30_000)
+            await page.goto(profile_url, wait_until="load", timeout=60_000)
             await page.wait_for_timeout(2000)
             html = await page.content()
         finally:
@@ -120,16 +160,7 @@ async def fetch_jobs(config: Config, seen_ids: set) -> List[JobListing]:
     seen_in_this_run: set = set()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
+        browser, context = await _make_context(pw)
         page = await context.new_page()
 
         try:

@@ -43,6 +43,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
+
+class _TelegramLogHandler(logging.Handler):
+    """Forwards ERROR+ log records to Telegram so you don't need to open Railway."""
+
+    def __init__(self, token: str, chat_id: str) -> None:
+        super().__init__(level=logging.ERROR)
+        self._token = token
+        self._chat_id = chat_id
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            import httpx as _httpx
+            msg = self.format(record)
+            _httpx.post(
+                f"https://api.telegram.org/bot{self._token}/sendMessage",
+                json={
+                    "chat_id": self._chat_id,
+                    "text": f"🚨 *Agent Error*\n```\n{msg[:3500]}\n```",
+                    "parse_mode": "Markdown",
+                },
+                timeout=5,
+            )
+        except Exception:
+            pass  # never let the log handler crash the agent
+
 # Global state
 _scan_lock = threading.Lock()
 _config_lock = threading.Lock()
@@ -252,12 +277,17 @@ def main() -> None:
         log.error("Config error: %s", e)
         sys.exit(1)
 
-    # 2. Init dependencies
+    # 2. Attach Telegram log handler so errors appear in Telegram, not just Railway
+    tg_handler = _TelegramLogHandler(_config.telegram_bot_token, _config.telegram_chat_id)
+    tg_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(tg_handler)
+
+    # 3. Init dependencies
     _skill_manager = SkillManager(_config.together_api_key)
     _seen_ids = load_seen_job_ids()
     log.info("Loaded %d seen job IDs, %d skills", len(_seen_ids), len(_skill_manager.list_skills()))
 
-    # 3. Start Telegram command bot
+    # 4. Start Telegram command bot
     bot = TelegramCommandBot(
         config=_config,
         config_lock=_config_lock,
@@ -267,7 +297,7 @@ def main() -> None:
     bot.start()
     log.info("Telegram bot started")
 
-    # 4. Send startup notification
+    # 5. Send startup notification
     send_startup_message(
         _config.telegram_bot_token,
         _config.telegram_chat_id,
@@ -275,7 +305,7 @@ def main() -> None:
         _config.job_locations,
     )
 
-    # 5. Background thread: expire stale confirmations every 5 minutes
+    # 6. Background thread: expire stale confirmations every 5 minutes
     def _expiry_loop() -> None:
         while True:
             time.sleep(300)
@@ -286,7 +316,7 @@ def main() -> None:
 
     threading.Thread(target=_expiry_loop, daemon=True, name="expiry-check").start()
 
-    # 6. Keep process alive — all work is driven by Telegram /hunt commands
+    # 7. Keep process alive — all work is driven by Telegram /hunt commands
     log.info("Ready. Send /hunt via Telegram to start a job scan.")
     try:
         while True:
