@@ -215,11 +215,27 @@ def _parse_profile_html(html: str) -> str:
 # ── Public job discovery (no login required) ──────────────────────────────
 
 def _extract_job_id(url: str) -> Optional[str]:
-    m = re.search(r"/jobs/view/(\d+)", url)
+    # New slug format: /jobs/view/software-architect-at-company-4414097827?...
+    # Old format:      /jobs/view/4414097827
+    path = url.split("?")[0].rstrip("/")
+    m = re.search(r"/jobs/view/[^/]*?(\d+)$", path)
     if m:
         return m.group(1)
     m = re.search(r"currentJobId=(\d+)", url)
     return m.group(1) if m else None
+
+
+def _job_id_from_card(card) -> Optional[str]:
+    """Extract job ID from data-entity-urn (most reliable) or href fallback."""
+    urn = card.get("data-entity-urn", "")  # e.g. "urn:li:jobPosting:4414097827"
+    m = re.search(r":(\d+)$", urn)
+    if m:
+        return m.group(1)
+    # fallback: parse the href
+    link = card.find("a", class_=re.compile(r"base-card__full-link"))
+    if link:
+        return _extract_job_id(link.get("href", ""))
+    return None
 
 
 async def fetch_jobs(config: Config, seen_ids: set) -> List[JobListing]:
@@ -314,11 +330,7 @@ async def _search_jobs_guest(
             if len(jobs) >= max_results:
                 break
 
-            link_el = card.find("a", class_=re.compile(r"base-card__full-link"))
-            if not link_el:
-                continue
-            href = link_el.get("href", "")
-            job_id = _extract_job_id(href)
+            job_id = _job_id_from_card(card)
             if not job_id or job_id in seen_ids:
                 continue
 
@@ -329,9 +341,7 @@ async def _search_jobs_guest(
             # Polite delay before each detail fetch (2-4s with jitter)
             await asyncio.sleep(2 + random.uniform(0, 2))
 
-            detail = await _fetch_job_detail_guest(client, job_id)
-            if detail is None:
-                continue
+            detail = await _fetch_job_detail_guest(client, job_id)  # always a dict
 
             jobs.append(JobListing(
                 id=job_id,
@@ -361,11 +371,15 @@ async def _search_jobs_guest(
 
 async def _fetch_job_detail_guest(
     client: httpx.AsyncClient, job_id: str
-) -> Optional[dict]:
+) -> dict:
+    """Always returns a dict — never None. Jobs are added even if detail fetch fails."""
+    empty = {"description": "", "is_easy_apply": False, "apply_url": None}
     try:
         r = await _polite_get(client, _JOB_VIEW_URL.format(job_id), timeout=20)
         if r is None or r.status_code != 200:
-            return None
+            log.debug("Detail fetch failed for job %s (status %s)", job_id, r.status_code if r else "None")
+            return empty
+
         soup = BeautifulSoup(r.text, "html.parser")
 
         desc_div = soup.find("div", class_=re.compile(r"show-more-less-html__markup|description__text"))
@@ -384,8 +398,8 @@ async def _fetch_job_detail_guest(
 
         return {"description": description, "is_easy_apply": is_easy_apply, "apply_url": apply_url}
     except Exception as e:
-        log.warning("Failed to fetch job detail for %s: %s", job_id, e)
-        return None
+        log.debug("Detail fetch error for job %s: %s", job_id, e)
+        return empty
 
 
 def _text(el) -> str:
