@@ -69,12 +69,12 @@ def send_document(
         return None
 
 
-def send_job_confirmation(
+def send_job_card(
     token: str,
     chat_id: str,
     job: JobListing,
-    app: Application,
 ) -> Optional[int]:
+    """Send a job match card. CV/CL are generated only after user confirms with YES."""
     bullets = "\n".join(f"• {b}" for b in (job.summary_bullets or []))
     if job.is_easy_apply:
         apply_type = "LinkedIn Easy Apply ⚠️ _(needs cookies — see /setcookies)_"
@@ -87,27 +87,10 @@ def send_job_confirmation(
         f"*Location:* {job.location}\n"
         f"*Type:* {apply_type}\n\n"
         f"*Key Points:*\n{bullets}\n\n"
-        f"[View on LinkedIn]({job.url})"
+        f"[View on LinkedIn]({job.url})\n\n"
+        f"_Reply *YES* to generate CV + cover letter and apply. Reply *NO* to skip._"
     )
-    mid = send_message(token, chat_id, text)
-    if not mid:
-        return None
-
-    # Send CV and cover letter as documents
-    if app.cv_path and Path(app.cv_path).exists():
-        send_document(token, chat_id, Path(app.cv_path), caption="Tailored CV", reply_to_message_id=mid)
-
-    final_mid = None
-    if app.cover_letter_path and Path(app.cover_letter_path).exists():
-        final_mid = send_document(
-            token,
-            chat_id,
-            Path(app.cover_letter_path),
-            caption="Cover Letter — *Reply YES to this message to apply* (expires in 24h)",
-            reply_to_message_id=mid,
-        )
-
-    return final_mid or mid
+    return send_message(token, chat_id, text)
 
 
 def send_application_result(

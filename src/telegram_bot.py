@@ -242,7 +242,7 @@ class TelegramCommandBot:
             return
         lines = ["*Recent Applications*\n"]
         for a in apps:
-            emoji = {"applied": "✅", "failed": "❌", "expired": "⏰", "rejected_by_user": "🚫", "applying": "⏳"}.get(a.status, "🔄")
+            emoji = {"applied": "✅", "failed": "❌", "expired": "⏰", "rejected_by_user": "🚫", "applying": "⏳", "generating": "✍️"}.get(a.status, "🔄")
             lines.append(f"{emoji} {a.job_title} @ {a.company} (score {a.score})")
         self._reply("\n".join(lines))
 

@@ -27,7 +27,7 @@ class Application:
     company: str
     job_url: str
     score: int
-    status: str  # pending_confirmation | applying | applied | rejected_by_user | failed | expired
+    status: str  # pending_confirmation | generating | applying | applied | rejected_by_user | failed | expired
     created_at: str
     apply_url: Optional[str] = None
     cv_path: Optional[str] = None

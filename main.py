@@ -31,7 +31,7 @@ from src.store import (
 from src.scraper import scrape_profile, fetch_jobs
 from src.analyzer import score_jobs_batch, generate_cv_content, generate_cover_letter_content
 from src.document_generator import generate_cv_pdf, generate_cover_letter_pdf
-from src.notifier import send_job_confirmation, send_application_result, send_startup_message, send_error
+from src.notifier import send_job_card, send_application_result, send_startup_message, send_error
 from src.telegram_bot import TelegramCommandBot
 from src.applicator import Applicator
 from src.skill_manager import SkillManager
@@ -75,6 +75,7 @@ _apply_lock = threading.Lock()
 _config: Optional[Config] = None
 _skill_manager: Optional[SkillManager] = None
 _seen_ids: set = set()
+_last_profile_text: str = ""  # cached from most recent scan
 
 
 def _personal_info() -> dict:
@@ -100,9 +101,11 @@ def run_scan() -> None:
             cfg = _config
 
         # 1. Scrape user profile (falls back to cache if LinkedIn blocks)
+        global _last_profile_text
         log.info("Fetching profile: %s", cfg.linkedin_profile_url)
         try:
             profile_text = asyncio.run(scrape_profile(cfg.linkedin_profile_url))
+            _last_profile_text = profile_text
             log.info("Profile ready: %d chars", len(profile_text))
         except Exception as e:
             log.error("Profile unavailable: %s", e)
@@ -167,20 +170,10 @@ def run_scan() -> None:
 
 
 def _process_job(job: JobListing, profile_text: str, cfg: Config) -> None:
-    log.info("Processing: %s @ %s (score %d)", job.title, job.company, job.score)
-    personal = _personal_info()
-    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    """Send job card to Telegram. CV/CL are generated only when user replies YES."""
+    log.info("Sending card: %s @ %s (score %d)", job.title, job.company, job.score)
 
-    # Generate CV and cover letter content via LLM
-    cv_data = generate_cv_content(job, profile_text, cfg.openrouter_api_key, personal)
-    cl_data = generate_cover_letter_content(job, profile_text, cfg.openrouter_api_key, personal)
-    cl_data["date"] = today
-
-    # Generate PDFs
-    cv_path = asyncio.run(generate_cv_pdf(cv_data, job.id))
-    cl_path = asyncio.run(generate_cover_letter_pdf(cl_data, job.id))
-
-    # Create application record
+    # Create a lightweight pending record — no CV/CL yet
     app = Application(
         id=str(uuid.uuid4()),
         job_id=job.id,
@@ -190,29 +183,21 @@ def _process_job(job: JobListing, profile_text: str, cfg: Config) -> None:
         apply_url=job.apply_url,
         score=job.score,
         status="pending_confirmation",
-        cv_path=str(cv_path),
-        cover_letter_path=str(cl_path),
         created_at=datetime.now(timezone.utc).isoformat(),
     )
     upsert_application(app)
 
-    # Send Telegram confirmation
-    message_id = send_job_confirmation(
-        cfg.telegram_bot_token,
-        cfg.telegram_chat_id,
-        job,
-        app,
-    )
+    message_id = send_job_card(cfg.telegram_bot_token, cfg.telegram_chat_id, job)
     if message_id:
         app.telegram_message_id = message_id
         upsert_application(app)
-        log.info("Confirmation sent for %s (message_id=%d)", job.title, message_id)
+        log.info("Card sent for %s (message_id=%d)", job.title, message_id)
     else:
-        log.warning("Failed to send Telegram confirmation for %s", job.title)
+        log.warning("Failed to send card for %s", job.title)
 
 
 def on_yes_reply(confirmation_message_id: int) -> None:
-    """Called by TelegramCommandBot when user replies YES to a confirmation."""
+    """Called by TelegramCommandBot when user replies YES to a job card."""
     with _config_lock:
         cfg = _config
 
@@ -224,17 +209,15 @@ def on_yes_reply(confirmation_message_id: int) -> None:
         log.info("YES reply for app %s already in status %s", app.id, app.status)
         return
 
-    log.info("User confirmed application for %s @ %s", app.job_title, app.company)
-    app.status = "applying"
+    log.info("User confirmed: %s @ %s — generating CV + cover letter", app.job_title, app.company)
+    app.status = "generating"
     app.confirmed_at = datetime.now(timezone.utc).isoformat()
     upsert_application(app)
 
-    # Find the corresponding JobListing data (rebuild minimal from app)
     job = _rebuild_job_from_app(app)
 
-    # Apply in background thread
     t = threading.Thread(
-        target=lambda: asyncio.run(_apply_and_notify(app, job, cfg)),
+        target=lambda: asyncio.run(_generate_and_apply(app, job, cfg)),
         daemon=True,
         name=f"apply-{app.id[:8]}",
     )
@@ -255,7 +238,38 @@ def _rebuild_job_from_app(app: Application) -> JobListing:
     )
 
 
-async def _apply_and_notify(app: Application, job: JobListing, cfg: Config) -> None:
+async def _generate_and_apply(app: Application, job: JobListing, cfg: Config) -> None:
+    """Generate CV + cover letter for the confirmed job, then apply."""
+    from src.notifier import send_message, send_document
+
+    personal = _personal_info()
+    profile_text = _last_profile_text
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    # Generate CV + cover letter content via LLM
+    try:
+        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id,
+                     f"Generating tailored CV and cover letter for *{job.title}* at {job.company}...")
+        cv_data = generate_cv_content(job, profile_text, cfg.openrouter_api_key, personal)
+        cl_data = generate_cover_letter_content(job, profile_text, cfg.openrouter_api_key, personal)
+        cl_data["date"] = today
+        cv_path = await generate_cv_pdf(cv_data, job.id)
+        cl_path = await generate_cover_letter_pdf(cl_data, job.id)
+    except Exception as e:
+        log.error("Doc generation failed for %s: %s", job.title, e)
+        app.status = "failed"
+        app.error = f"Doc generation failed: {e}"
+        upsert_application(app)
+        send_error(cfg.telegram_bot_token, cfg.telegram_chat_id,
+                   f"Failed to generate documents for {job.title}: {e}")
+        return
+
+    app.cv_path = str(cv_path)
+    app.cover_letter_path = str(cl_path)
+    app.status = "applying"
+    upsert_application(app)
+
+    # Apply
     applicator = Applicator(cfg, _skill_manager)
     success = await applicator.apply(app, job)
 
