@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 
 _POLL_TIMEOUT = 30
 _RETRY_SLEEP = 5
+_CONFLICT_SLEEP = 15  # 409: another instance still running, wait longer
 
 
 class TelegramCommandBot:
@@ -38,9 +40,22 @@ class TelegramCommandBot:
 
     def start(self) -> threading.Thread:
         self._running = True
+        self._clear_webhook()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="telegram-bot")
         self._thread.start()
         return self._thread
+
+    def _clear_webhook(self) -> None:
+        """Drop any webhook and close other sessions so long-polling can start cleanly."""
+        try:
+            httpx.post(
+                f"{self._api}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=10,
+            )
+            log.info("Webhook cleared")
+        except Exception as e:
+            log.warning("Could not clear webhook: %s", e)
 
     def stop(self) -> None:
         self._running = False
@@ -66,14 +81,68 @@ class TelegramCommandBot:
                 params={"offset": self._offset, "timeout": _POLL_TIMEOUT, "allowed_updates": ["message"]},
                 timeout=_POLL_TIMEOUT + 5,
             )
+            if r.status_code == 409:
+                # Another bot instance is still polling — wait for it to die
+                log.warning("409 Conflict: another bot instance running, waiting %ds...", _CONFLICT_SLEEP)
+                time.sleep(_CONFLICT_SLEEP)
+                return []
             r.raise_for_status()
             return r.json().get("result", [])
         except Exception:
             return []
 
+    def _handle_document(self, message: dict) -> None:
+        """Save an uploaded JSON cookie file to data/linkedin_cookies.json."""
+        doc = message.get("document", {})
+        if not doc.get("file_name", "").endswith(".json"):
+            self._reply(
+                "Please send a *.json* cookie file.\n\n"
+                "How to export: open linkedin.com in Chrome → install *Cookie-Editor* extension "
+                "→ Export → All → save as .json → send here."
+            )
+            return
+        try:
+            # Step 1: get the file path from Telegram
+            r = httpx.get(
+                f"{self._api}/getFile",
+                params={"file_id": doc["file_id"]},
+                timeout=10,
+            )
+            r.raise_for_status()
+            file_path = r.json()["result"]["file_path"]
+
+            # Step 2: download the file content
+            token = self._config.telegram_bot_token
+            r2 = httpx.get(
+                f"https://api.telegram.org/file/bot{token}/{file_path}",
+                timeout=30,
+            )
+            r2.raise_for_status()
+
+            # Step 3: validate JSON
+            try:
+                cookies = json.loads(r2.text)
+            except Exception:
+                self._reply("Invalid JSON. Please export cookies in JSON format.")
+                return
+
+            # Step 4: save
+            from pathlib import Path as _Path
+            cookies_path = _Path("data/linkedin_cookies.json")
+            cookies_path.parent.mkdir(parents=True, exist_ok=True)
+            cookies_path.write_text(r2.text)
+            self._reply(f"✅ Saved *{len(cookies)}* LinkedIn cookies. Next /hunt will use them.")
+        except Exception as e:
+            self._reply(f"Failed to save cookies: {e}")
+
     def _handle(self, message: dict) -> None:
         chat_id = str(message.get("chat", {}).get("id", ""))
         if chat_id != self._config.telegram_chat_id:
+            return
+
+        # Document upload → cookie import
+        if message.get("document"):
+            self._handle_document(message)
             return
 
         text = (message.get("text") or "").strip()
@@ -91,6 +160,10 @@ class TelegramCommandBot:
             self._handle_no_reply(reply_mid)
             return
 
+        if text.upper() == "SCRIPT":
+            self._send_colab_script()
+            return
+
         if not text.startswith("/"):
             return
 
@@ -103,6 +176,7 @@ class TelegramCommandBot:
             "/status": self._cmd_status,
             "/history": self._cmd_history,
             "/setprofile": self._cmd_setprofile,
+            "/setcookies": self._cmd_setcookies,
             "/help": self._cmd_help,
         }
         handler = handlers.get(cmd)
@@ -181,6 +255,64 @@ class TelegramCommandBot:
             self._config.linkedin_profile_url = url
         self._reply(f"Profile URL updated to:\n`{url}`")
 
+    def _send_colab_script(self) -> None:
+        with self._config_lock:
+            email = getattr(self._config, "linkedin_email", "") or "YOUR_EMAIL"
+            password = getattr(self._config, "linkedin_password", "") or "YOUR_PASSWORD"
+        script = (
+            "```python\n"
+            "# Run in Google Colab (colab.research.google.com)\n"
+            "# Cell 1 — install\n"
+            "!pip install -q playwright\n"
+            "!playwright install chromium\n\n"
+            "# Cell 2 — export cookies\n"
+            "import asyncio, json\n"
+            "from playwright.async_api import async_playwright\n\n"
+            "async def export_cookies():\n"
+            f"    EMAIL = '{email}'\n"
+            f"    PASSWORD = '{password}'\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=True)\n"
+            "        ctx = await browser.new_context()\n"
+            "        page = await ctx.new_page()\n"
+            "        await page.goto('https://www.linkedin.com/login')\n"
+            "        await page.fill('#username', EMAIL)\n"
+            "        await page.fill('#password', PASSWORD)\n"
+            "        await page.click('[type=submit]')\n"
+            "        await page.wait_for_timeout(5000)\n"
+            "        cookies = await ctx.cookies()\n"
+            "        with open('linkedin_cookies.json', 'w') as f:\n"
+            "            json.dump(cookies, f)\n"
+            "        print(f'Saved {len(cookies)} cookies')\n"
+            "        await browser.close()\n\n"
+            "asyncio.run(export_cookies())\n"
+            "```\n\n"
+            "Download `linkedin_cookies.json` from the Colab file panel and send it here."
+        )
+        self._reply(script)
+
+    def _cmd_setcookies(self, _: str) -> None:
+        self._reply(
+            "*Import LinkedIn Cookies*\n\n"
+            "Only needed for *Easy Apply* jobs. External ATS jobs work without this.\n\n"
+            "*🍎 On iPhone/iPad (iOS) — easiest:*\n"
+            "1. Open Safari → go to colab.research.google.com\n"
+            "2. Sign in with Google → New notebook\n"
+            "3. Reply *SCRIPT* here — I'll send you the code to paste\n"
+            "4. Run it, download the cookies file, send it here\n\n"
+            "*📱 On Android (Firefox):*\n"
+            "1. Install *Firefox for Android*\n"
+            "2. Open Firefox → go to `linkedin.com` and log in\n"
+            "3. Install add-on: *Cookie Quick Manager* (search in Firefox add-ons)\n"
+            "4. Tap the add-on → *Export as JSON file*\n"
+            "5. Send that file here\n\n"
+            "*💻 On Desktop Chrome:*\n"
+            "1. Log into `linkedin.com`\n"
+            "2. Install *Cookie-Editor* extension\n"
+            "3. Click it → *Export* → *All* (JSON) → send file here\n\n"
+            "Cookies are saved on the Railway volume and reused automatically."
+        )
+
     def _cmd_help(self, _: str) -> None:
         self._reply(
             "*LinkedIn Job Agent Commands*\n\n"
@@ -188,6 +320,7 @@ class TelegramCommandBot:
             "/status — show config and application stats\n"
             "/history — show last 10 applications\n"
             "/setprofile `<url>` — update your LinkedIn profile URL\n"
+            "/setcookies — import browser cookies (fixes checkpoint errors)\n"
             "/help — show this message\n\n"
             "Reply *YES* to a job confirmation to apply.\n"
             "Reply *NO* to skip a job."
