@@ -126,7 +126,7 @@ def run_scan() -> None:
         # 3. Score jobs
         log.info("Scoring %d jobs (min score: %d)...", len(jobs), cfg.min_score)
         try:
-            qualified_jobs = score_jobs_batch(jobs, profile_text, cfg.together_api_key, cfg.min_score)
+            qualified_jobs = score_jobs_batch(jobs, profile_text, cfg.openrouter_api_key, cfg.min_score)
             log.info("%d jobs qualify (score >= %d)", len(qualified_jobs), cfg.min_score)
         except Exception as e:
             log.error("Job scoring failed: %s", e)
@@ -155,8 +155,8 @@ def _process_job(job: JobListing, profile_text: str, cfg: Config) -> None:
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
 
     # Generate CV and cover letter content via LLM
-    cv_data = generate_cv_content(job, profile_text, cfg.together_api_key, personal)
-    cl_data = generate_cover_letter_content(job, profile_text, cfg.together_api_key, personal)
+    cv_data = generate_cv_content(job, profile_text, cfg.openrouter_api_key, personal)
+    cl_data = generate_cover_letter_content(job, profile_text, cfg.openrouter_api_key, personal)
     cl_data["date"] = today
 
     # Generate PDFs
@@ -283,7 +283,7 @@ def main() -> None:
     logging.getLogger().addHandler(tg_handler)
 
     # 3. Init dependencies
-    _skill_manager = SkillManager(_config.together_api_key)
+    _skill_manager = SkillManager(_config.openrouter_api_key)
     _seen_ids = load_seen_job_ids()
     log.info("Loaded %d seen job IDs, %d skills", len(_seen_ids), len(_skill_manager.list_skills()))
 

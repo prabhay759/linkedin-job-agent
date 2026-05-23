@@ -16,7 +16,7 @@ class Config:
     linkedin_password: str
     job_keywords: List[str]
     job_locations: List[str]
-    together_api_key: str
+    openrouter_api_key: str
     telegram_bot_token: str
     telegram_chat_id: str
     your_full_name: str
@@ -32,7 +32,7 @@ class Config:
             ("linkedin_profile_url", self.linkedin_profile_url),
             ("linkedin_email", self.linkedin_email),
             ("linkedin_password", self.linkedin_password),
-            ("together_api_key", self.together_api_key),
+            ("openrouter_api_key", self.openrouter_api_key),
             ("telegram_bot_token", self.telegram_bot_token),
             ("telegram_chat_id", self.telegram_chat_id),
         ]
@@ -54,7 +54,7 @@ def load_config() -> Config:
         linkedin_password=os.getenv("LINKEDIN_PASSWORD", ""),
         job_keywords=_list("JOB_KEYWORDS", "Software Engineer"),
         job_locations=_list("JOB_LOCATIONS", "Remote"),
-        together_api_key=os.getenv("TOGETHER_API_KEY", ""),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         your_full_name=os.getenv("YOUR_FULL_NAME", ""),

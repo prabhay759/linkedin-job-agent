@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import List, Optional, Tuple
 
 import httpx
@@ -10,15 +11,62 @@ from src.models import JobListing
 
 log = logging.getLogger(__name__)
 
-TOGETHER_API = "https://api.together.xyz/v1/chat/completions"
-LLAMA_MODEL = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
-_TIMEOUT = 45
+OPENROUTER_API = "https://openrouter.ai/api/v1"
+_TIMEOUT = 60
 _TEMPERATURE = 0.2
+_FALLBACK_MODEL = "meta-llama/llama-3.1-70b-instruct:free"
+
+# Cached after first successful detection
+_selected_model: Optional[str] = None
+
+
+def detect_free_model(api_key: str) -> str:
+    """
+    Fetch OpenRouter's model list, pick the highest-capability free model
+    (ranked by context window size). Result is cached for the process lifetime.
+    """
+    global _selected_model
+    if _selected_model:
+        return _selected_model
+
+    try:
+        r = httpx.get(
+            f"{OPENROUTER_API}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        models = r.json().get("data", [])
+
+        # Free = prompt cost is "0" (OpenRouter returns costs as strings)
+        free = [
+            m for m in models
+            if str(m.get("pricing", {}).get("prompt", "1")) == "0"
+        ]
+
+        # Prefer larger context windows as a proxy for capability
+        free.sort(key=lambda m: m.get("context_length", 0), reverse=True)
+
+        if free:
+            _selected_model = free[0]["id"]
+            log.info(
+                "Auto-selected free model: %s (context: %s tokens)",
+                _selected_model,
+                free[0].get("context_length", "?"),
+            )
+            return _selected_model
+    except Exception as e:
+        log.warning("Could not fetch OpenRouter models, using fallback: %s", e)
+
+    _selected_model = _FALLBACK_MODEL
+    log.info("Using fallback model: %s", _selected_model)
+    return _selected_model
 
 
 def _call_llm(api_key: str, system: str, user: str) -> Optional[dict]:
+    model = detect_free_model(api_key)
     payload = {
-        "model": LLAMA_MODEL,
+        "model": model,
         "temperature": _TEMPERATURE,
         "response_format": {"type": "json_object"},
         "messages": [
@@ -28,19 +76,56 @@ def _call_llm(api_key: str, system: str, user: str) -> Optional[dict]:
     }
     try:
         r = httpx.post(
-            TOGETHER_API,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            f"{OPENROUTER_API}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/prabhay759/linkedin-job-agent",
+                "X-Title": "LinkedIn Job Agent",
+            },
             json=payload,
             timeout=_TIMEOUT,
         )
         r.raise_for_status()
         content = r.json()["choices"][0]["message"]["content"]
+        # Some models wrap JSON in markdown fences — strip them
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
         return json.loads(content)
     except json.JSONDecodeError as e:
         log.error("LLM returned invalid JSON: %s", e)
         return None
     except Exception as e:
         log.error("LLM call failed: %s", e)
+        return None
+
+
+def _call_llm_raw(api_key: str, system: str, user: str) -> Optional[str]:
+    """Like _call_llm but returns raw text — used for code generation."""
+    model = detect_free_model(api_key)
+    payload = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    try:
+        r = httpx.post(
+            f"{OPENROUTER_API}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/prabhay759/linkedin-job-agent",
+                "X-Title": "LinkedIn Job Agent",
+            },
+            json=payload,
+            timeout=_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log.error("LLM raw call failed: %s", e)
         return None
 
 
@@ -247,35 +332,17 @@ def generate_ats_skill_code(
     api_key: str,
     error_context: Optional[str] = None,
 ) -> Optional[str]:
-    payload = {
-        "model": LLAMA_MODEL,
-        "temperature": 0.1,
-        "messages": [
-            {"role": "system", "content": _ATS_SYSTEM},
-            {
-                "role": "user",
-                "content": _ATS_USER.format(
-                    domain=domain,
-                    html=page_html[:4000],
-                    error=error_context or "none",
-                ),
-            },
-        ],
-    }
-    try:
-        r = httpx.post(
-            TOGETHER_API,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=60,
-        )
-        r.raise_for_status()
-        code = r.json()["choices"][0]["message"]["content"].strip()
-        # Strip markdown fences if present
-        if code.startswith("```"):
-            lines = code.splitlines()
-            code = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        return code
-    except Exception as e:
-        log.error("ATS skill code generation failed: %s", e)
+    code = _call_llm_raw(
+        api_key,
+        _ATS_SYSTEM,
+        _ATS_USER.format(
+            domain=domain,
+            html=page_html[:4000],
+            error=error_context or "none",
+        ),
+    )
+    if not code:
         return None
+    # Strip markdown fences if the model added them despite instructions
+    code = re.sub(r"^```(?:python)?\s*|\s*```$", "", code.strip())
+    return code
