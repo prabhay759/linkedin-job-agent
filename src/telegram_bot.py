@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -90,9 +91,58 @@ class TelegramCommandBot:
         except Exception:
             return []
 
+    def _handle_document(self, message: dict) -> None:
+        """Save an uploaded JSON cookie file to data/linkedin_cookies.json."""
+        doc = message.get("document", {})
+        if not doc.get("file_name", "").endswith(".json"):
+            self._reply(
+                "Please send a *.json* cookie file.\n\n"
+                "How to export: open linkedin.com in Chrome → install *Cookie-Editor* extension "
+                "→ Export → All → save as .json → send here."
+            )
+            return
+        try:
+            # Step 1: get the file path from Telegram
+            r = httpx.get(
+                f"{self._api}/getFile",
+                params={"file_id": doc["file_id"]},
+                timeout=10,
+            )
+            r.raise_for_status()
+            file_path = r.json()["result"]["file_path"]
+
+            # Step 2: download the file content
+            token = self._config.telegram_bot_token
+            r2 = httpx.get(
+                f"https://api.telegram.org/file/bot{token}/{file_path}",
+                timeout=30,
+            )
+            r2.raise_for_status()
+
+            # Step 3: validate JSON
+            try:
+                cookies = json.loads(r2.text)
+            except Exception:
+                self._reply("Invalid JSON. Please export cookies in JSON format.")
+                return
+
+            # Step 4: save
+            from pathlib import Path as _Path
+            cookies_path = _Path("data/linkedin_cookies.json")
+            cookies_path.parent.mkdir(parents=True, exist_ok=True)
+            cookies_path.write_text(r2.text)
+            self._reply(f"✅ Saved *{len(cookies)}* LinkedIn cookies. Next /hunt will use them.")
+        except Exception as e:
+            self._reply(f"Failed to save cookies: {e}")
+
     def _handle(self, message: dict) -> None:
         chat_id = str(message.get("chat", {}).get("id", ""))
         if chat_id != self._config.telegram_chat_id:
+            return
+
+        # Document upload → cookie import
+        if message.get("document"):
+            self._handle_document(message)
             return
 
         text = (message.get("text") or "").strip()
@@ -122,6 +172,7 @@ class TelegramCommandBot:
             "/status": self._cmd_status,
             "/history": self._cmd_history,
             "/setprofile": self._cmd_setprofile,
+            "/setcookies": self._cmd_setcookies,
             "/help": self._cmd_help,
         }
         handler = handlers.get(cmd)
@@ -200,6 +251,18 @@ class TelegramCommandBot:
             self._config.linkedin_profile_url = url
         self._reply(f"Profile URL updated to:\n`{url}`")
 
+    def _cmd_setcookies(self, _: str) -> None:
+        self._reply(
+            "*Import LinkedIn Cookies*\n\n"
+            "Send a JSON cookie file directly to this chat.\n\n"
+            "How to export from Chrome:\n"
+            "1. Log into linkedin.com in your browser\n"
+            "2. Install *Cookie-Editor* extension\n"
+            "3. Click the extension → *Export* → *Export All* (JSON)\n"
+            "4. Save the file and send it here\n\n"
+            "The agent will use these cookies to apply — no password login needed."
+        )
+
     def _cmd_help(self, _: str) -> None:
         self._reply(
             "*LinkedIn Job Agent Commands*\n\n"
@@ -207,6 +270,7 @@ class TelegramCommandBot:
             "/status — show config and application stats\n"
             "/history — show last 10 applications\n"
             "/setprofile `<url>` — update your LinkedIn profile URL\n"
+            "/setcookies — import browser cookies (fixes checkpoint errors)\n"
             "/help — show this message\n\n"
             "Reply *YES* to a job confirmation to apply.\n"
             "Reply *NO* to skip a job."
