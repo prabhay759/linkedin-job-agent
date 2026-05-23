@@ -160,6 +160,10 @@ class TelegramCommandBot:
             self._handle_no_reply(reply_mid)
             return
 
+        if text.upper() == "SCRIPT":
+            self._send_colab_script()
+            return
+
         if not text.startswith("/"):
             return
 
@@ -251,10 +255,51 @@ class TelegramCommandBot:
             self._config.linkedin_profile_url = url
         self._reply(f"Profile URL updated to:\n`{url}`")
 
+    def _send_colab_script(self) -> None:
+        with self._config_lock:
+            email = getattr(self._config, "linkedin_email", "") or "YOUR_EMAIL"
+            password = getattr(self._config, "linkedin_password", "") or "YOUR_PASSWORD"
+        script = (
+            "```python\n"
+            "# Run in Google Colab (colab.research.google.com)\n"
+            "# Cell 1 — install\n"
+            "!pip install -q playwright\n"
+            "!playwright install chromium\n\n"
+            "# Cell 2 — export cookies\n"
+            "import asyncio, json\n"
+            "from playwright.async_api import async_playwright\n\n"
+            "async def export_cookies():\n"
+            f"    EMAIL = '{email}'\n"
+            f"    PASSWORD = '{password}'\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=True)\n"
+            "        ctx = await browser.new_context()\n"
+            "        page = await ctx.new_page()\n"
+            "        await page.goto('https://www.linkedin.com/login')\n"
+            "        await page.fill('#username', EMAIL)\n"
+            "        await page.fill('#password', PASSWORD)\n"
+            "        await page.click('[type=submit]')\n"
+            "        await page.wait_for_timeout(5000)\n"
+            "        cookies = await ctx.cookies()\n"
+            "        with open('linkedin_cookies.json', 'w') as f:\n"
+            "            json.dump(cookies, f)\n"
+            "        print(f'Saved {len(cookies)} cookies')\n"
+            "        await browser.close()\n\n"
+            "asyncio.run(export_cookies())\n"
+            "```\n\n"
+            "Download `linkedin_cookies.json` from the Colab file panel and send it here."
+        )
+        self._reply(script)
+
     def _cmd_setcookies(self, _: str) -> None:
         self._reply(
             "*Import LinkedIn Cookies*\n\n"
             "Only needed for *Easy Apply* jobs. External ATS jobs work without this.\n\n"
+            "*🍎 On iPhone/iPad (iOS) — easiest:*\n"
+            "1. Open Safari → go to colab.research.google.com\n"
+            "2. Sign in with Google → New notebook\n"
+            "3. Reply *SCRIPT* here — I'll send you the code to paste\n"
+            "4. Run it, download the cookies file, send it here\n\n"
             "*📱 On Android (Firefox):*\n"
             "1. Install *Firefox for Android*\n"
             "2. Open Firefox → go to `linkedin.com` and log in\n"
@@ -265,10 +310,6 @@ class TelegramCommandBot:
             "1. Log into `linkedin.com`\n"
             "2. Install *Cookie-Editor* extension\n"
             "3. Click it → *Export* → *All* (JSON) → send file here\n\n"
-            "*☁️ No browser at all? Use Google Colab:*\n"
-            "1. Open colab.research.google.com\n"
-            "2. Run: `!pip install playwright && playwright install chromium`\n"
-            "3. Run the login script — I'll generate it for you on request\n\n"
             "Cookies are saved on the Railway volume and reused automatically."
         )
 
