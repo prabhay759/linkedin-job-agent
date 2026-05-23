@@ -33,21 +33,11 @@ class Applicator:
 
     async def apply(self, app: Application, job: JobListing) -> bool:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
+            from src.scraper import _make_context, _login_linkedin
+            browser, context = await _make_context(pw)
             page = await context.new_page()
             try:
-                # Log in
-                from src.scraper import _login_linkedin
-                logged_in = await _login_linkedin(page, self._config)
+                logged_in = await _login_linkedin(page, context, self._config)
                 if not logged_in:
                     app.error = "LinkedIn login failed"
                     return False

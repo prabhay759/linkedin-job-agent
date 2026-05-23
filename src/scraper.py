@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlencode, urlparse
 
@@ -67,6 +69,9 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 """
 
 
+_COOKIES_FILE = Path("data/linkedin_cookies.json")
+
+
 async def _make_context(pw):
     """Return a stealth browser context that mimics a real Chrome installation."""
     browser = await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
@@ -81,6 +86,36 @@ async def _make_context(pw):
     return browser, context
 
 
+async def _save_cookies(context) -> None:
+    cookies = await context.cookies()
+    _COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _COOKIES_FILE.write_text(json.dumps(cookies, indent=2))
+    log.info("Saved %d LinkedIn cookies", len(cookies))
+
+
+async def _load_cookies(context) -> bool:
+    if not _COOKIES_FILE.exists():
+        return False
+    try:
+        cookies = json.loads(_COOKIES_FILE.read_text())
+        await context.add_cookies(cookies)
+        log.info("Loaded %d cookies from cache", len(cookies))
+        return True
+    except Exception as e:
+        log.warning("Could not load cookies: %s", e)
+        return False
+
+
+async def _is_logged_in(page) -> bool:
+    """Quick check: visit LinkedIn and see if we land on the feed without login."""
+    try:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="load", timeout=30_000)
+        await page.wait_for_timeout(1500)
+        return "/feed" in page.url and "/login" not in page.url
+    except Exception:
+        return False
+
+
 def _build_search_url(keyword: str, location: str, start: int = 0) -> str:
     params = {
         "keywords": keyword,
@@ -91,20 +126,65 @@ def _build_search_url(keyword: str, location: str, start: int = 0) -> str:
     return f"{LINKEDIN_JOBS_SEARCH}?{urlencode(params)}"
 
 
-async def _login_linkedin(page: Page, config: Config) -> bool:
+async def _login_linkedin(page, context, config: Config) -> bool:
+    """
+    Login flow with cookie caching:
+    1. Try saved cookies first (avoids login page entirely)
+    2. Fall back to email/password login
+    3. After submit, handle feed / checkpoint / verification states
+    4. On success, save cookies for next run
+    """
+    # Try cached session first
+    if await _load_cookies(context):
+        if await _is_logged_in(page):
+            log.info("LinkedIn session restored from cookies")
+            return True
+        log.info("Cached cookies expired — doing fresh login")
+
     try:
         await page.goto(LINKEDIN_LOGIN_URL, wait_until="load", timeout=60_000)
-        # Wait for the form to actually render (headless detection can delay this)
         await page.wait_for_selector(_SEL["email"], timeout=20_000)
         await page.wait_for_timeout(800)
         await page.fill(_SEL["email"], config.linkedin_email)
         await page.wait_for_timeout(400)
         await page.fill(_SEL["password"], config.linkedin_password)
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(600)
         await page.click(_SEL["submit"])
-        await page.wait_for_url("**/feed/**", timeout=30_000)
-        log.info("LinkedIn login successful")
-        return True
+
+        # Wait for any navigation to settle (not just /feed)
+        await page.wait_for_load_state("load", timeout=30_000)
+        await page.wait_for_timeout(2000)
+
+        url = page.url
+
+        if "/feed" in url:
+            log.info("LinkedIn login successful")
+            await _save_cookies(context)
+            return True
+
+        if any(x in url for x in ["/checkpoint", "/check/", "/challenge", "/uas/", "/authwall"]):
+            log.error(
+                "LinkedIn requires manual verification (URL: %s). "
+                "Please log in manually via a browser, export cookies to "
+                "data/linkedin_cookies.json and redeploy.",
+                url,
+            )
+            return False
+
+        if "/login" in url:
+            log.error("LinkedIn credentials rejected — check LINKEDIN_EMAIL and LINKEDIN_PASSWORD")
+            return False
+
+        # Unknown page — check if the nav bar is visible (means we're logged in)
+        nav = await page.query_selector(".global-nav__me, #global-nav")
+        if nav:
+            log.info("LinkedIn login successful (URL: %s)", url)
+            await _save_cookies(context)
+            return True
+
+        log.error("LinkedIn login: unknown post-login state at %s", url)
+        return False
+
     except Exception as e:
         log.error("LinkedIn login failed: %s", e)
         return False
@@ -164,7 +244,7 @@ async def fetch_jobs(config: Config, seen_ids: set) -> List[JobListing]:
         page = await context.new_page()
 
         try:
-            logged_in = await _login_linkedin(page, config)
+            logged_in = await _login_linkedin(page, context, config)
             if not logged_in:
                 log.error("Could not log into LinkedIn — skipping job fetch")
                 return []
