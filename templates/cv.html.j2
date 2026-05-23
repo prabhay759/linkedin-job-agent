@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10pt; color: #1a1a1a; background: #fff; }
+  .page { padding: 20mm 18mm; max-width: 210mm; }
+
+  /* Header */
+  .header { border-bottom: 2.5px solid #1a56db; padding-bottom: 10px; margin-bottom: 14px; }
+  .header h1 { font-size: 22pt; font-weight: 700; color: #1a1a1a; letter-spacing: -0.5px; }
+  .header .headline { font-size: 11pt; color: #1a56db; font-weight: 600; margin: 3px 0 7px; }
+  .contact { font-size: 9pt; color: #555; display: flex; flex-wrap: wrap; gap: 12px; }
+  .contact span::before { content: ''; }
+
+  /* Section */
+  .section { margin-bottom: 14px; }
+  .section h2 {
+    font-size: 10pt; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;
+    color: #1a56db; border-bottom: 1px solid #d1d9f0; padding-bottom: 3px; margin-bottom: 8px;
+  }
+
+  /* Summary */
+  .summary p { line-height: 1.5; color: #333; font-size: 9.5pt; }
+
+  /* Experience */
+  .exp-item { margin-bottom: 10px; }
+  .exp-header { display: flex; justify-content: space-between; align-items: baseline; }
+  .exp-title { font-weight: 700; font-size: 10pt; }
+  .exp-company { font-weight: 600; color: #444; font-size: 9.5pt; }
+  .exp-dates { font-size: 9pt; color: #777; white-space: nowrap; }
+  .exp-bullets { margin-top: 4px; padding-left: 14px; }
+  .exp-bullets li { font-size: 9.5pt; line-height: 1.45; color: #333; margin-bottom: 2px; }
+
+  /* Skills */
+  .skills-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+  .skill-tag {
+    background: #eff4ff; color: #1a56db; font-size: 8.5pt;
+    padding: 2px 8px; border-radius: 3px; border: 1px solid #d1d9f0;
+  }
+
+  /* Education */
+  .edu-item { display: flex; justify-content: space-between; margin-bottom: 5px; }
+  .edu-degree { font-weight: 600; font-size: 9.5pt; }
+  .edu-school { font-size: 9pt; color: #555; }
+  .edu-dates { font-size: 9pt; color: #777; }
+
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .page { padding: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>{{ name }}</h1>
+    <div class="headline">{{ headline }}</div>
+    <div class="contact">
+      {% if email %}<span>{{ email }}</span>{% endif %}
+      {% if phone %}<span>{{ phone }}</span>{% endif %}
+      {% if location %}<span>{{ location }}</span>{% endif %}
+      {% if linkedin_url %}<span>{{ linkedin_url }}</span>{% endif %}
+    </div>
+  </div>
+
+  <!-- Summary -->
+  {% if summary %}
+  <div class="section summary">
+    <h2>Profile</h2>
+    <p>{{ summary }}</p>
+  </div>
+  {% endif %}
+
+  <!-- Experience -->
+  {% if experience %}
+  <div class="section">
+    <h2>Experience</h2>
+    {% for exp in experience %}
+    <div class="exp-item">
+      <div class="exp-header">
+        <div>
+          <span class="exp-title">{{ exp.title }}</span>
+          {% if exp.company %} · <span class="exp-company">{{ exp.company }}</span>{% endif %}
+        </div>
+        {% if exp.dates %}<span class="exp-dates">{{ exp.dates }}</span>{% endif %}
+      </div>
+      {% if exp.bullets %}
+      <ul class="exp-bullets">
+        {% for b in exp.bullets %}<li>{{ b }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- Skills -->
+  {% if skills %}
+  <div class="section">
+    <h2>Skills</h2>
+    <div class="skills-grid">
+      {% for skill in skills %}
+      <span class="skill-tag">{{ skill }}</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Education -->
+  {% if education %}
+  <div class="section">
+    <h2>Education</h2>
+    {% for edu in education %}
+    <div class="edu-item">
+      <div>
+        <div class="edu-degree">{{ edu.degree }}</div>
+        <div class="edu-school">{{ edu.school }}</div>
+      </div>
+      {% if edu.dates %}<span class="edu-dates">{{ edu.dates }}</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>
