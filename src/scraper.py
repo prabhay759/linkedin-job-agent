@@ -282,58 +282,79 @@ async def _search_jobs_guest(
     seen_ids: set,
     max_results: int,
 ) -> List[JobListing]:
-    r = await _polite_get(
-        client,
-        _GUEST_JOBS_API,
-        params={
-            "keywords": keyword,
-            "location": location,
-            "start": 0,
-            "f_TPR": "r86400",
-            "count": min(max_results, 25),
-        },
-    )
-    if r is None or r.status_code != 200:
-        log.warning("LinkedIn guest API failed for '%s'/'%s'", keyword, location)
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
     jobs: List[JobListing] = []
+    page_size = 25
 
-    for card in soup.find_all("div", class_=re.compile(r"base-card")):
-        link_el = card.find("a", class_=re.compile(r"base-card__full-link"))
-        if not link_el:
-            continue
-        href = link_el.get("href", "")
-        job_id = _extract_job_id(href)
-        if not job_id or job_id in seen_ids:
-            continue
-
-        title = _text(card.find(class_=re.compile(r"base-search-card__title")))
-        company = _text(card.find(class_=re.compile(r"base-search-card__subtitle")))
-        loc = _text(card.find(class_=re.compile(r"job-search-card__location"))) or location
-
-        # Polite delay before each detail fetch (2-4s with jitter)
-        await asyncio.sleep(2 + random.uniform(0, 2))
-
-        detail = await _fetch_job_detail_guest(client, job_id)
-        if detail is None:
-            continue
-
-        jobs.append(JobListing(
-            id=job_id,
-            title=title or "Unknown Title",
-            company=company or "Unknown Company",
-            location=loc,
-            url=_JOB_VIEW_URL.format(job_id),
-            apply_url=detail.get("apply_url"),
-            description=detail.get("description", ""),
-            is_easy_apply=detail.get("is_easy_apply", False),
-            scraped_at=datetime.now(timezone.utc).isoformat(),
-        ))
-
+    for start in range(0, max_results + page_size, page_size):
         if len(jobs) >= max_results:
             break
+
+        params = {
+            "keywords": keyword,
+            "start": start,
+            "f_TPR": "r86400",
+            "count": page_size,
+        }
+        if location:
+            params["location"] = location
+
+        r = await _polite_get(client, _GUEST_JOBS_API, params=params)
+        if r is None or r.status_code != 200:
+            log.warning("LinkedIn guest API failed at start=%d for '%s'", start, keyword)
+            break
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.find_all("div", class_=re.compile(r"base-card"))
+        if not cards:
+            log.info("No more results at start=%d for '%s'", start, keyword)
+            break
+
+        page_new = 0
+        for card in cards:
+            if len(jobs) >= max_results:
+                break
+
+            link_el = card.find("a", class_=re.compile(r"base-card__full-link"))
+            if not link_el:
+                continue
+            href = link_el.get("href", "")
+            job_id = _extract_job_id(href)
+            if not job_id or job_id in seen_ids:
+                continue
+
+            title = _text(card.find(class_=re.compile(r"base-search-card__title")))
+            company = _text(card.find(class_=re.compile(r"base-search-card__subtitle")))
+            loc = _text(card.find(class_=re.compile(r"job-search-card__location"))) or location
+
+            # Polite delay before each detail fetch (2-4s with jitter)
+            await asyncio.sleep(2 + random.uniform(0, 2))
+
+            detail = await _fetch_job_detail_guest(client, job_id)
+            if detail is None:
+                continue
+
+            jobs.append(JobListing(
+                id=job_id,
+                title=title or "Unknown Title",
+                company=company or "Unknown Company",
+                location=loc,
+                url=_JOB_VIEW_URL.format(job_id),
+                apply_url=detail.get("apply_url"),
+                description=detail.get("description", ""),
+                is_easy_apply=detail.get("is_easy_apply", False),
+                scraped_at=datetime.now(timezone.utc).isoformat(),
+            ))
+            page_new += 1
+
+        log.info("Page start=%d: %d new jobs for '%s'", start, page_new, keyword)
+
+        # Stop paginating if this page was mostly already-seen
+        if page_new == 0:
+            break
+
+        # Delay between pages
+        if len(jobs) < max_results:
+            await asyncio.sleep(3 + random.uniform(0, 2))
 
     return jobs
 
