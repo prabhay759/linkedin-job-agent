@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 _POLL_TIMEOUT = 30
 _RETRY_SLEEP = 5
+_CONFLICT_SLEEP = 15  # 409: another instance still running, wait longer
 
 
 class TelegramCommandBot:
@@ -38,9 +39,22 @@ class TelegramCommandBot:
 
     def start(self) -> threading.Thread:
         self._running = True
+        self._clear_webhook()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="telegram-bot")
         self._thread.start()
         return self._thread
+
+    def _clear_webhook(self) -> None:
+        """Drop any webhook and close other sessions so long-polling can start cleanly."""
+        try:
+            httpx.post(
+                f"{self._api}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=10,
+            )
+            log.info("Webhook cleared")
+        except Exception as e:
+            log.warning("Could not clear webhook: %s", e)
 
     def stop(self) -> None:
         self._running = False
@@ -66,6 +80,11 @@ class TelegramCommandBot:
                 params={"offset": self._offset, "timeout": _POLL_TIMEOUT, "allowed_updates": ["message"]},
                 timeout=_POLL_TIMEOUT + 5,
             )
+            if r.status_code == 409:
+                # Another bot instance is still polling — wait for it to die
+                log.warning("409 Conflict: another bot instance running, waiting %ds...", _CONFLICT_SLEEP)
+                time.sleep(_CONFLICT_SLEEP)
+                return []
             r.raise_for_status()
             return r.json().get("result", [])
         except Exception:
