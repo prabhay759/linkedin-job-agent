@@ -16,23 +16,15 @@ OPENROUTER_API = "https://openrouter.ai/api/v1"
 _TIMEOUT = 60
 _TEMPERATURE = 0.2
 
-# Curated list of free models known to work well — tried in order on failure
-_CANDIDATE_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.1-70b-instruct:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "google/gemma-3-27b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-]
-
-_selected_model: Optional[str] = None
-
 _HEADERS_TMPL = {
     "Content-Type": "application/json",
     "HTTP-Referer": "https://github.com/prabhay759/linkedin-job-agent",
     "X-Title": "LinkedIn Job Agent",
 }
+
+# Populated once from OpenRouter — sorted by context length descending
+_free_models: List[str] = []
+_selected_model: Optional[str] = None
 
 
 def _auth_headers(api_key: str) -> dict:
@@ -41,22 +33,8 @@ def _auth_headers(api_key: str) -> dict:
 
 # ── Model selection ────────────────────────────────────────────────────────
 
-def detect_free_model(api_key: str) -> str:
-    """
-    Try the curated candidate list in order, return the first that responds.
-    Falls back to the last candidate if nothing works.
-    Result cached for the process lifetime.
-    """
-    global _selected_model
-    if _selected_model:
-        return _selected_model
-
-    if not api_key:
-        log.error("OPENROUTER_API_KEY is not set — LLM calls will fail")
-        _selected_model = _CANDIDATE_MODELS[0]
-        return _selected_model
-
-    # Quick probe: ask the models list endpoint for free models
+def _fetch_free_models(api_key: str) -> List[str]:
+    """Query OpenRouter for all currently available free models, sorted by context length."""
     try:
         r = httpx.get(
             f"{OPENROUTER_API}/models",
@@ -64,36 +42,70 @@ def detect_free_model(api_key: str) -> str:
             timeout=15,
         )
         if r.status_code == 401:
-            log.error("OpenRouter: invalid API key (401). Check OPENROUTER_API_KEY in Railway.")
-            _selected_model = _CANDIDATE_MODELS[0]
-            return _selected_model
+            log.error("OpenRouter 401 — invalid API key. Check OPENROUTER_API_KEY in Railway.")
+            return []
+        r.raise_for_status()
 
-        models_by_id = {m["id"]: m for m in r.json().get("data", [])}
+        models = r.json().get("data", [])
 
-        # Pick the first candidate that appears in the model list
-        for candidate in _CANDIDATE_MODELS:
-            if candidate in models_by_id:
-                _selected_model = candidate
-                ctx = models_by_id[candidate].get("context_length", "?")
-                log.info("Selected free model: %s (context: %s tokens)", candidate, ctx)
-                return _selected_model
+        # Free = prompt price is "0" (OpenRouter returns costs as strings)
+        free = [
+            m for m in models
+            if str(m.get("pricing", {}).get("prompt", "1")) == "0"
+            and m.get("id")
+        ]
+
+        # Prefer larger context windows as a proxy for capability
+        free.sort(key=lambda m: m.get("context_length", 0), reverse=True)
+
+        ids = [m["id"] for m in free]
+        log.info("OpenRouter: %d free models available (top: %s)", len(ids), ids[0] if ids else "none")
+        return ids
+
     except Exception as e:
-        log.warning("Could not probe OpenRouter models: %s — using first candidate", e)
+        log.warning("Could not fetch OpenRouter model list: %s", e)
+        return []
 
-    _selected_model = _CANDIDATE_MODELS[0]
-    log.info("Using default model: %s", _selected_model)
+
+def detect_free_model(api_key: str) -> str:
+    """Return the current best free model. Fetches the live list on first call."""
+    global _free_models, _selected_model
+
+    if _selected_model:
+        return _selected_model
+
+    if not api_key:
+        log.error("OPENROUTER_API_KEY is not set — LLM calls will fail")
+        _selected_model = "meta-llama/llama-3.3-70b-instruct:free"
+        return _selected_model
+
+    if not _free_models:
+        _free_models = _fetch_free_models(api_key)
+
+    if _free_models:
+        _selected_model = _free_models[0]
+        log.info("Selected model: %s", _selected_model)
+    else:
+        _selected_model = "meta-llama/llama-3.3-70b-instruct:free"
+        log.warning("No free models found — falling back to %s", _selected_model)
+
     return _selected_model
 
 
 def _try_next_model() -> None:
-    """Cycle _selected_model to the next candidate after a failure."""
-    global _selected_model
+    """Cycle to the next free model after a failure."""
+    global _free_models, _selected_model
+
+    if not _free_models:
+        return
+
     try:
-        idx = _CANDIDATE_MODELS.index(_selected_model)
-        next_idx = (idx + 1) % len(_CANDIDATE_MODELS)
+        idx = _free_models.index(_selected_model)
+        next_idx = (idx + 1) % len(_free_models)
     except ValueError:
         next_idx = 0
-    _selected_model = _CANDIDATE_MODELS[next_idx]
+
+    _selected_model = _free_models[next_idx]
     log.info("Switched to model: %s", _selected_model)
 
 
