@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 LinkedIn Job Application Agent
-Scans LinkedIn every hour, scores jobs vs. your profile, generates tailored
-CVs + cover letters, asks Telegram for confirmation, then applies automatically.
+On-demand job hunter: send /hunt via Telegram to scan LinkedIn, score jobs
+against your profile, generate tailored CVs + cover letters, and apply after
+your Telegram confirmation.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-import schedule
 import time
 
 from src.config import load_config, Config
@@ -275,22 +275,22 @@ def main() -> None:
         _config.job_locations,
     )
 
-    # 5. Schedule recurring tasks
-    schedule.every(_config.scan_interval_minutes).minutes.do(run_scan)
-    schedule.every(5).minutes.do(expire_pending_check)
-    log.info("Scheduler configured: scan every %d min", _config.scan_interval_minutes)
+    # 5. Background thread: expire stale confirmations every 5 minutes
+    def _expiry_loop() -> None:
+        while True:
+            time.sleep(300)
+            try:
+                expire_pending_check()
+            except Exception as e:
+                log.warning("Expiry check failed: %s", e)
 
-    # 6. Immediate first scan
-    log.info("Running initial scan...")
-    scan_thread = threading.Thread(target=run_scan, daemon=True)
-    scan_thread.start()
+    threading.Thread(target=_expiry_loop, daemon=True, name="expiry-check").start()
 
-    # 7. Main scheduler loop
-    log.info("Entering scheduler loop")
+    # 6. Keep process alive — all work is driven by Telegram /hunt commands
+    log.info("Ready. Send /hunt via Telegram to start a job scan.")
     try:
         while True:
-            schedule.run_pending()
-            time.sleep(30)
+            time.sleep(60)
     except KeyboardInterrupt:
         log.info("Shutting down")
         bot.stop()

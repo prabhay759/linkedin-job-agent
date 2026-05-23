@@ -24,7 +24,6 @@ class Config:
     your_email: str
     your_location: str
     min_score: int = 7
-    scan_interval_minutes: int = 60
     confirmation_timeout_hours: int = 24
     max_jobs_per_scan: int = 20
 
@@ -63,7 +62,6 @@ def load_config() -> Config:
         your_email=os.getenv("YOUR_EMAIL", ""),
         your_location=os.getenv("YOUR_LOCATION", ""),
         min_score=int(os.getenv("MIN_SCORE", "7")),
-        scan_interval_minutes=int(os.getenv("SCAN_INTERVAL_MINUTES", "60")),
         confirmation_timeout_hours=int(os.getenv("CONFIRMATION_TIMEOUT_HOURS", "24")),
         max_jobs_per_scan=int(os.getenv("MAX_JOBS_PER_SCAN", "20")),
     )

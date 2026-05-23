@@ -133,7 +133,8 @@ def send_startup_message(token: str, chat_id: str, keywords: list, locations: li
     send_message(
         token,
         chat_id,
-        f"*LinkedIn Job Agent started*\n\nSearching for: `{kw}`\nLocations: `{loc}`\n\n"
+        f"*LinkedIn Job Agent ready*\n\nKeywords: `{kw}`\nLocations: `{loc}`\n\n"
+        f"Send /hunt to start a job scan.\n"
         f"Commands: /hunt /status /history /setprofile /help",
     )
 
